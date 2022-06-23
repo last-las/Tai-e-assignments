@@ -23,6 +23,7 @@
 package pascal.taie.analysis.dataflow.solver;
 
 import pascal.taie.analysis.dataflow.analysis.DataflowAnalysis;
+import pascal.taie.analysis.dataflow.analysis.LiveVariableAnalysis;
 import pascal.taie.analysis.dataflow.fact.DataflowResult;
 import pascal.taie.analysis.graph.cfg.CFG;
 
@@ -82,6 +83,14 @@ public abstract class Solver<Node, Fact> {
 
     protected void initializeBackward(CFG<Node> cfg, DataflowResult<Node, Fact> result) {
         // TODO - finish me
+        for (Node node: cfg) {
+            // in
+            if (cfg.isExit(node)) {
+                result.setInFact(node, analysis.newBoundaryFact(cfg));
+            } else {
+                result.setInFact(node, analysis.newInitialFact());
+            }
+        }
     }
 
     /**
