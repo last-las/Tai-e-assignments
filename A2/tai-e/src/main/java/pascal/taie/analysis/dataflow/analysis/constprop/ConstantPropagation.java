@@ -179,18 +179,18 @@ public class ConstantPropagation extends
                 int value1 = val1.getConstant();
                 int value2 = val2.getConstant();
 
-                int value;
+                Value result;
                 if (exp instanceof ArithmeticExp) {
-                    value = arithmeticResult(value1, value2, ((ArithmeticExp) exp).getOperator());
+                    result = arithmeticResult(value1, value2, ((ArithmeticExp) exp).getOperator());
                 } else if (exp instanceof ConditionExp) {
-                    value = conditionResult(value1, value2, ((ConditionExp) exp).getOperator());
+                    result = conditionResult(value1, value2, ((ConditionExp) exp).getOperator());
                 } else if (exp instanceof ShiftExp) {
-                    value = shiftResult(value1, value2, ((ShiftExp) exp).getOperator());
+                    result = shiftResult(value1, value2, ((ShiftExp) exp).getOperator());
                 } else { // BitwiseExp
-                    value = bitwiseResult(value1, value2, ((BitwiseExp) exp).getOperator());
+                    result = bitwiseResult(value1, value2, ((BitwiseExp) exp).getOperator());
                 }
 
-                return Value.makeConstant(value);
+                return result;
             } else if (val1.isNAC() || val2.isNAC()) {
                 return Value.getNAC();
             } else {
@@ -201,17 +201,29 @@ public class ConstantPropagation extends
         }
     }
 
-    private static int arithmeticResult(int value1, int value2, ArithmeticExp.Op op) {
+    private static Value arithmeticResult(int value1, int value2, ArithmeticExp.Op op) {
         return switch (op) {
-            case ADD -> value1 + value2;
-            case DIV -> value1 / value2;
-            case MUL -> value1 * value2;
-            case REM -> value1 % value2;
-            case SUB -> value1 - value2;
+            case ADD -> Value.makeConstant(value1 + value2);
+            case DIV -> {
+                if (value2 == 0) {
+                    yield  Value.getUndef();
+                } else {
+                    yield Value.makeConstant(value1 / value2);
+                }
+            }
+            case MUL -> Value.makeConstant(value1 * value2);
+            case REM -> {
+                if (value2 == 0) {
+                    yield Value.getUndef();
+                } else {
+                    yield Value.makeConstant(value1 % value2);
+                }
+            }
+            case SUB -> Value.makeConstant(value1 - value2);
         };
     }
 
-    private static int conditionResult(int value1, int value2, ConditionExp.Op op) {
+    private static Value conditionResult(int value1, int value2, ConditionExp.Op op) {
         boolean flag = switch (op) {
             case EQ -> value1 == value2;
             case NE -> value1 != value2;
@@ -221,25 +233,29 @@ public class ConstantPropagation extends
             case GE -> value1 >= value2;
         };
         if (flag) {
-            return 1;
+            return Value.makeConstant(1);
         } else {
-            return 0;
+            return Value.makeConstant(0);
         }
     }
 
-    private static int shiftResult(int value1, int value2, ShiftExp.Op op) {
-        return switch (op) {
+    private static Value shiftResult(int value1, int value2, ShiftExp.Op op) {
+        int v = switch (op) {
             case SHL -> value1 << value2;
             case SHR -> value1 >> value2;
             case USHR -> value1 >>> value2;
         };
+
+        return Value.makeConstant(v);
     }
 
-    private static int bitwiseResult(int value1, int value2, BitwiseExp.Op op) {
-        return switch (op) {
+    private static Value bitwiseResult(int value1, int value2, BitwiseExp.Op op) {
+        int v = switch (op) {
             case OR -> value1 | value2;
             case AND -> value1 & value2;
             case XOR -> value1 ^ value2;
         };
+
+        return Value.makeConstant(v);
     }
 }
