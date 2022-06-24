@@ -26,6 +26,8 @@ import pascal.taie.analysis.dataflow.analysis.DataflowAnalysis;
 import pascal.taie.analysis.dataflow.fact.DataflowResult;
 import pascal.taie.analysis.graph.cfg.CFG;
 
+import java.util.Vector;
+
 class WorkListSolver<Node, Fact> extends Solver<Node, Fact> {
 
     WorkListSolver(DataflowAnalysis<Node, Fact> analysis) {
@@ -35,6 +37,30 @@ class WorkListSolver<Node, Fact> extends Solver<Node, Fact> {
     @Override
     protected void doSolveForward(CFG<Node> cfg, DataflowResult<Node, Fact> result) {
         // TODO - finish me
+        // TODO - How about using Set? Why or Why not?
+        Vector<Node> workList = new Vector<Node>();
+        // add all basic blocks to workList, except Entry block!
+        for (Node node: cfg) {
+            if (!cfg.isEntry(node)) {
+                workList.add(node);
+            }
+        }
+
+        while (!workList.isEmpty()) {
+            Node curBlock = workList.remove(0);
+            // calculate IN[B] and update the result
+            Fact inB = result.getInFact(curBlock);
+            for (Node predsNode: cfg.getPredsOf(curBlock)) {
+                Fact outP = result.getOutFact(predsNode);
+                analysis.meetInto(outP, inB);
+            }
+
+            // calculate OUT[B]
+            Fact outB = result.getOutFact(curBlock);
+            if (analysis.transferNode(curBlock, inB, outB)) {
+                workList.addAll(cfg.getSuccsOf(curBlock));
+            }
+        }
     }
 
     @Override
