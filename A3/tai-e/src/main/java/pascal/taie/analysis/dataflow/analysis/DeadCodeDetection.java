@@ -33,21 +33,11 @@ import pascal.taie.analysis.graph.cfg.CFGBuilder;
 import pascal.taie.analysis.graph.cfg.Edge;
 import pascal.taie.config.AnalysisConfig;
 import pascal.taie.ir.IR;
-import pascal.taie.ir.exp.ArithmeticExp;
-import pascal.taie.ir.exp.ArrayAccess;
-import pascal.taie.ir.exp.CastExp;
-import pascal.taie.ir.exp.FieldAccess;
-import pascal.taie.ir.exp.NewExp;
-import pascal.taie.ir.exp.RValue;
-import pascal.taie.ir.exp.Var;
-import pascal.taie.ir.stmt.AssignStmt;
-import pascal.taie.ir.stmt.If;
-import pascal.taie.ir.stmt.Stmt;
-import pascal.taie.ir.stmt.SwitchStmt;
+import pascal.taie.ir.exp.*;
+import pascal.taie.ir.stmt.*;
+import pascal.taie.util.collection.Pair;
 
-import java.util.Comparator;
-import java.util.Set;
-import java.util.TreeSet;
+import java.util.*;
 
 public class DeadCodeDetection extends MethodAnalysis {
 
@@ -71,7 +61,108 @@ public class DeadCodeDetection extends MethodAnalysis {
         Set<Stmt> deadCode = new TreeSet<>(Comparator.comparing(Stmt::getIndex));
         // TODO - finish me
         // Your task is to recognize dead code in ir and add it to deadCode
+        deadCode.addAll(ir.getStmts());
+        HashSet<Stmt> visitedSet = new HashSet<>(); // record visited Stmt
+        Vector<Stmt> visitList = new Vector<>(); // BFS list
+        visitList.add(cfg.getEntry());
+
+        while (!visitList.isEmpty()) { // bfs
+            Stmt curStmt = visitList.remove(0);
+            visitedSet.add(curStmt);
+            Set<Stmt> curStmtSuccessors;
+            if (curStmt instanceof AssignStmt<?, ?> assignStmt) {
+                SetFact<Var> curLiveVars = liveVars.getOutFact(curStmt);
+                if (!isUseLessAssignment(assignStmt,curLiveVars)) {
+                    deadCode.remove(curStmt);
+                }
+                curStmtSuccessors = cfg.getSuccsOf(curStmt);
+            } else if (curStmt instanceof If ifStmt) {
+                deadCode.remove(curStmt);
+
+                CPFact curCPFact = constants.getInFact(curStmt);
+                curStmtSuccessors = getSuccessorsOfIfStmt(ifStmt, curCPFact, cfg);
+            } else if (curStmt instanceof SwitchStmt switchStmt) {
+                deadCode.remove(curStmt);
+
+                CPFact curCPFact = constants.getInFact(curStmt);
+                curStmtSuccessors = getSuccessorsOfSwitchStmt(switchStmt, curCPFact, cfg);
+            } else { // DefinitionStmt and other stmt.class
+                deadCode.remove(curStmt);
+                curStmtSuccessors = cfg.getSuccsOf(curStmt);
+            }
+
+            for (Stmt succes: curStmtSuccessors) {
+                if (!visitedSet.contains(succes)) {
+                    visitedSet.add(succes);
+                    visitList.add(succes);
+                }
+            }
+        }
         return deadCode;
+    }
+
+    private static boolean isUseLessAssignment(AssignStmt<?,?> assignStmt, SetFact<Var> curLiveVars) {
+        LValue lValue = assignStmt.getLValue();
+        if (lValue instanceof Var lVar) {
+            return !curLiveVars.contains(lVar) && hasNoSideEffect(assignStmt.getRValue());
+        }
+
+        return false;
+    }
+
+    private static Set<Stmt> getSuccessorsOfIfStmt(If ifStmt, CPFact curCPFact, CFG<Stmt> cfg) {
+        Set<Stmt> successor = new HashSet<>();
+
+        ConditionExp conditionExp = ifStmt.getCondition();
+        Value value = ConstantPropagation.evaluate(conditionExp, curCPFact);
+        if (value.isConstant()) {
+            Set<Edge<Stmt>> outEdges = cfg.getOutEdgesOf(ifStmt);
+            for (Edge<Stmt> outEdge: outEdges) {
+                boolean condition;
+                if (value.getConstant() == 1) {
+                    condition = true;
+                } else {
+                    assert value.getConstant() == 0;
+                    condition = false;
+                }
+                Edge.Kind kind = outEdge.getKind();
+                if (condition && kind == Edge.Kind.IF_TRUE) {
+                    successor.add(outEdge.getTarget());
+                    break;
+                } else if (!condition && kind == Edge.Kind.IF_FALSE){
+                    successor.add(outEdge.getTarget());
+                    break;
+                }
+            }
+            assert successor.size() == 1;
+        } else {
+            successor.addAll(cfg.getSuccsOf(ifStmt));
+        }
+
+        return successor;
+    }
+
+    private static Set<Stmt> getSuccessorsOfSwitchStmt(SwitchStmt switchStmt, CPFact curCPFact, CFG<Stmt> cfg) {
+        Set<Stmt> successor = new HashSet<>();
+
+        Var var = switchStmt.getVar();
+        Value value = ConstantPropagation.evaluate(var, curCPFact);
+        if (value.isConstant()) {
+            int constant = value.getConstant();
+            for (Pair<Integer, Stmt> caseTarget : switchStmt.getCaseTargets()) {
+                if (caseTarget.first() == constant) {
+                    successor.add(caseTarget.second());
+                    break;
+                }
+            }
+            if (successor.isEmpty()) {
+                successor.add(switchStmt.getDefaultTarget());
+            }
+        } else {
+            successor.addAll(cfg.getSuccsOf(switchStmt));
+        }
+
+        return successor;
     }
 
     /**
