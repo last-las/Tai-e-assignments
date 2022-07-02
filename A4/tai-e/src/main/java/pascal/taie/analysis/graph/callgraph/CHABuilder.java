@@ -30,9 +30,7 @@ import pascal.taie.language.classes.JClass;
 import pascal.taie.language.classes.JMethod;
 import pascal.taie.language.classes.Subsignature;
 
-import java.util.ArrayDeque;
-import java.util.Queue;
-import java.util.Set;
+import java.util.*;
 
 /**
  * Implementation of the CHA algorithm.
@@ -51,6 +49,22 @@ class CHABuilder implements CGBuilder<Invoke, JMethod> {
         DefaultCallGraph callGraph = new DefaultCallGraph();
         callGraph.addEntryMethod(entry);
         // TODO - finish me
+        Vector<JMethod> workList = new Vector<>();
+        workList.add(entry);
+        while (!workList.isEmpty()) {
+            JMethod curMethod = workList.remove(0);
+            if (!callGraph.contains(curMethod)) {
+                callGraph.addReachableMethod(curMethod);
+                callGraph.callSitesIn(curMethod).forEach(callSite -> {
+                    for (JMethod jMethod : resolve(callSite)) {
+                        Edge<Invoke, JMethod> edge
+                                = new Edge<>(CallGraphs.getCallKind(callSite), callSite, jMethod);
+                        callGraph.addEdge(edge);
+                        workList.add(jMethod);
+                    }
+                });
+            }
+        }
         return callGraph;
     }
 
@@ -59,7 +73,82 @@ class CHABuilder implements CGBuilder<Invoke, JMethod> {
      */
     private Set<JMethod> resolve(Invoke callSite) {
         // TODO - finish me
-        return null;
+        Set<JMethod> targetMethods = new HashSet<JMethod>();
+        MethodRef methodRef = callSite.getMethodRef();
+        JClass declaringClass = methodRef.getDeclaringClass();
+        Subsignature subsignature = methodRef.getSubsignature();
+        switch (CallGraphs.getCallKind(callSite)) {
+            case STATIC -> {
+                targetMethods.add(declaringClass.getDeclaredMethod(subsignature));
+            }
+            case SPECIAL -> {
+                JMethod targetMethod = dispatch(declaringClass, subsignature);
+                if (targetMethod != null) {
+                    targetMethods.add(targetMethod);
+                }
+            }
+            case VIRTUAL -> {
+                for (JClass subClass : getSubClassesOfClass(declaringClass)) {
+                    JMethod targetMethod = dispatch(subClass, subsignature);
+                    if (targetMethod != null) {
+                        targetMethods.add(targetMethod);
+                    }
+                }
+            }
+            case INTERFACE -> {
+                for (JClass subClass : getSubClassesOfInterface(declaringClass)) {
+                    JMethod targetMethod = dispatch(subClass, subsignature);
+                    if (targetMethod != null) {
+                        targetMethods.add(targetMethod);
+                    }
+                }
+            }
+        }
+        return targetMethods;
+    }
+
+    private Set<JClass> getSubClassesOfClass(JClass declaringClass) {
+        Set<JClass> subClasses = new HashSet<>();
+        Vector<JClass> dfsQueue = new Vector<>();
+        dfsQueue.add(declaringClass);
+        while (!dfsQueue.isEmpty()) {
+            JClass curClass = dfsQueue.remove(0);
+            if (!subClasses.contains(curClass)) {
+                subClasses.add(curClass);
+                dfsQueue.addAll(hierarchy.getDirectSubclassesOf(curClass));
+            }
+        }
+
+        return subClasses;
+    }
+
+    private Set<JClass> getSubClassesOfInterface(JClass declaringClass) {
+        // search all sub-interfaces and get the implementors of them
+        Set<JClass> subInterfaces = new HashSet<>();
+        Set<JClass> subClasses = new HashSet<>();
+        Vector<JClass> dfsQueue = new Vector<>();
+        dfsQueue.add(declaringClass);
+        while (!dfsQueue.isEmpty()) {
+            JClass curInterface = dfsQueue.remove(0);
+            if (!subInterfaces.contains(curInterface)) {
+                subInterfaces.add(curInterface);
+                subClasses.addAll(hierarchy.getDirectImplementorsOf(curInterface));
+                dfsQueue.addAll(hierarchy.getDirectSubinterfacesOf(curInterface));
+            }
+        }
+
+        // get all subclasses of the implementors
+        dfsQueue.addAll(subClasses);
+        subClasses.clear();
+        while (!dfsQueue.isEmpty()) {
+            JClass curClass = dfsQueue.remove(0);
+            if (!subClasses.contains(curClass)) {
+                subClasses.add(curClass);
+                dfsQueue.addAll(hierarchy.getDirectSubclassesOf(curClass));
+            }
+        }
+
+        return subClasses;
     }
 
     /**
@@ -70,6 +159,17 @@ class CHABuilder implements CGBuilder<Invoke, JMethod> {
      */
     private JMethod dispatch(JClass jclass, Subsignature subsignature) {
         // TODO - finish me
+        do {
+            for (JMethod declaredMethod : jclass.getDeclaredMethods()) {
+                if (!declaredMethod.isAbstract() &&
+                        Objects.equals(declaredMethod.getSubsignature().toString(), subsignature.toString())) {
+                    return declaredMethod;
+                }
+            }
+
+            jclass = jclass.getSuperClass();
+        } while (jclass != null);
+
         return null;
     }
 }

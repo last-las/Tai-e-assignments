@@ -22,12 +22,17 @@
 
 package pascal.taie.analysis.dataflow.inter;
 
+import pascal.taie.analysis.dataflow.analysis.constprop.CPFact;
 import pascal.taie.analysis.dataflow.fact.DataflowResult;
+import pascal.taie.analysis.graph.callgraph.Edge;
 import pascal.taie.analysis.graph.icfg.ICFG;
+import pascal.taie.analysis.graph.icfg.ICFGEdge;
 import pascal.taie.util.collection.SetQueue;
+import picocli.CommandLine;
 
 import java.util.Queue;
 import java.util.Set;
+import java.util.Vector;
 import java.util.stream.Collectors;
 
 /**
@@ -60,9 +65,40 @@ class InterSolver<Method, Node, Fact> {
 
     private void initialize() {
         // TODO - finish me
+        for (Node node : icfg) {
+            result.setInFact(node, analysis.newInitialFact());
+            result.setOutFact(node, analysis.newInitialFact());
+        }
+        icfg.entryMethods().forEach(entryMethod -> {
+            Node entry = icfg.getEntryOf(entryMethod);
+            result.setOutFact(entry, analysis.newBoundaryFact(entry));
+        });
     }
 
     private void doSolve() {
         // TODO - finish me
+        Vector<Node> workList = new Vector<>();
+
+        for (Node node: icfg) {
+            workList.add(node);
+        }
+
+        while (!workList.isEmpty()) {
+            Node curBlock = workList.remove(0);
+            // calculate IN[B] and update the result
+            Fact inB = result.getInFact(curBlock);
+            for (ICFGEdge<Node> inEdge: icfg.getInEdgesOf(curBlock)) {
+                assert curBlock == inEdge.getTarget();
+                Node predsNode = inEdge.getSource();
+                Fact outP = result.getOutFact(predsNode);
+                analysis.meetInto(analysis.transferEdge(inEdge, outP), inB);
+            }
+
+            // calculate OUT[B]
+            Fact outB = result.getOutFact(curBlock);
+            if (analysis.transferNode(curBlock, inB, outB)) {
+                workList.addAll(icfg.getSuccsOf(curBlock));
+            }
+        }
     }
 }
