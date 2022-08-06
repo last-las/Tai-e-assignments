@@ -25,6 +25,8 @@ package pascal.taie.analysis.dataflow.inter;
 import pascal.taie.analysis.dataflow.fact.DataflowResult;
 import pascal.taie.analysis.graph.icfg.ICFG;
 import pascal.taie.analysis.graph.icfg.ICFGEdge;
+import pascal.taie.ir.stmt.StoreArray;
+import pascal.taie.ir.stmt.StoreField;
 import pascal.taie.util.collection.SetQueue;
 
 import java.util.Queue;
@@ -94,7 +96,19 @@ class InterSolver<Method, Node, Fact> {
             // calculate OUT[B]
             Fact outB = result.getOutFact(curBlock);
             if (analysis.transferNode(curBlock, inB, outB)) {
-                workList.addAll(icfg.getSuccsOf(curBlock));
+                if (curBlock instanceof StoreField || curBlock instanceof StoreArray) {
+                    addNodesToWorkList(workList, icfg.getNodes());
+                } else {
+                    addNodesToWorkList(workList,icfg.getSuccsOf(curBlock));
+                }
+            }
+        }
+    }
+
+    private void addNodesToWorkList(Vector<Node> workList, Set<Node> nodes) {
+        for (Node node : nodes) {
+            if (!workList.contains(node)) {
+                workList.add(node);
             }
         }
     }

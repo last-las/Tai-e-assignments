@@ -223,6 +223,13 @@ class ExtralFact {
 
     public Map<Pair<Var, Value>, Value> arraysValue = Maps.newMap();
 
+    public void printArraysValue() {
+        for (Pair<Var, Value> varValuePair : arraysValue.keySet()) {
+            Var first = varValuePair.first();
+            System.out.println(first.getMethod().getName() + ":" + first + "[" + varValuePair.second() + "]=" + arraysValue.get(varValuePair));
+        }
+    }
+
     public Value getStaticFieldValue(JField jField) {
         Value value = staticFieldsValue.get(jField);
         return parseValue(value);
@@ -246,11 +253,41 @@ class ExtralFact {
     }
 
     public Value getArrayValue(Var base, Value indexVal) {
+        if (indexVal.isConstant()) {
+            return meetValue(
+                    _getArrayValue(base, indexVal),
+                    _getArrayValue(base, Value.getNAC())
+            );
+        } else if (indexVal.isNAC()) {
+            Value baseNacVal = _getArrayValue(base, Value.getNAC());
+            if (!baseNacVal.isUndef()) {
+                return baseNacVal;
+            }
+
+            Value baseConstantVal = Value.getUndef();
+            for (Pair<Var, Value> varValuePair : arraysValue.keySet()) {
+                if (varValuePair.first() == base) {
+                    baseConstantVal = meetValue(baseConstantVal, arraysValue.get(varValuePair));
+                }
+            }
+            return baseConstantVal;
+        } else { // Undef
+            return Value.getUndef();
+        }
+    }
+
+    public Value _getArrayValue(Var base, Value indexVal) {
         Value value = arraysValue.get(new Pair<>(base, indexVal));
         return parseValue(value);
     }
 
     public void setArrayValue(Var base, Value indexVal, Value arrayValue) {
+        if (!indexVal.isUndef()) {
+            _setArrayValue(base, indexVal, arrayValue);
+        }
+    }
+
+    private void _setArrayValue(Var base, Value indexVal, Value arrayValue) {
         if (!arrayValue.isUndef()) {
             arraysValue.put(new Pair<>(base, indexVal), arrayValue);
         }
@@ -261,6 +298,20 @@ class ExtralFact {
             return Value.getUndef();
         } else {
             return value;
+        }
+    }
+
+    private Value meetValue(Value v1, Value v2) {
+        if (v1.isNAC() || v2.isNAC()) {
+            return Value.getNAC();
+        } else if (v1.isUndef()) {
+            return v2;
+        } else if (v2.isUndef()) {
+            return v1;
+        } else if (v1.getConstant() == v2.getConstant()) {
+            return v1;
+        } else {
+            return Value.getNAC();
         }
     }
 }
@@ -332,9 +383,10 @@ class StmtProcessor implements StmtVisitor<Void> {
     public Void visit(Copy copy) {
         Var lVar = copy.getLValue();
         if (ConstantPropagation.canHoldInt(lVar)) {
-            Var rVar = copy.getRValue();
-            Value rValue = newOut.get(rVar);
-            newOut.update(lVar, rValue);
+/*            Var rVar = copy.getRValue();
+            Value rValue = newOut.get(rVar);*/
+            Value lVarNewValue = ConstantPropagation.evaluate(copy.getRValue(), this.newOut);
+            newOut.update(lVar, lVarNewValue);
         }
         return null;
     }
@@ -472,7 +524,7 @@ class StmtProcessor implements StmtVisitor<Void> {
         Var index = arrayAccess.getIndex();
         Value indexValue = newOut.get(index);
 
-        Value oldValue = extralFact.getArrayValue(base,indexValue);
+        Value oldValue = extralFact._getArrayValue(base,indexValue);
         Value newValue = cp.meetValue(rVarValue, oldValue);
         extralFact.setArrayValue(base, indexValue, newValue);
 
