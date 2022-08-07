@@ -523,6 +523,9 @@ class StmtProcessor implements StmtVisitor<Void> {
         Var base = arrayAccess.getBase();
         Var index = arrayAccess.getIndex();
         Value indexValue = newOut.get(index);
+        if (indexValue.isUndef()) {
+            return null;
+        }
 
         Value oldValue = extralFact._getArrayValue(base,indexValue);
         Value newValue = cp.meetValue(rVarValue, oldValue);
