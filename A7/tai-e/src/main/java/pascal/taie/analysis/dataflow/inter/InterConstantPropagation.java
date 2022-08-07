@@ -259,11 +259,6 @@ class ExtralFact {
                     _getArrayValue(base, Value.getNAC())
             );
         } else if (indexVal.isNAC()) {
-            Value baseNacVal = _getArrayValue(base, Value.getNAC());
-            if (!baseNacVal.isUndef()) {
-                return baseNacVal;
-            }
-
             Value baseConstantVal = Value.getUndef();
             for (Pair<Var, Value> varValuePair : arraysValue.keySet()) {
                 if (varValuePair.first() == base) {
