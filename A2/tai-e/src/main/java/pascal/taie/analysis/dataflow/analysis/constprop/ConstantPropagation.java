@@ -54,7 +54,9 @@ public class ConstantPropagation extends
         // TODO - finish me
         CPFact boundaryFact = new CPFact();
         for (Var param : cfg.getIR().getParams()) {
-            boundaryFact.update(param, Value.getNAC());
+            if (canHoldInt(param)) {
+                boundaryFact.update(param, Value.getNAC());
+            }
         }
 
         return boundaryFact;
@@ -192,6 +194,12 @@ public class ConstantPropagation extends
 
                 return result;
             } else if (val1.isNAC() || val2.isNAC()) {
+                if (val2.isConstant() && val2.getConstant() == 0 && exp instanceof  ArithmeticExp arithmeticExp) {
+                    ArithmeticExp.Op operator = arithmeticExp.getOperator();
+                    if (operator == ArithmeticExp.Op.DIV || operator == ArithmeticExp.Op.REM)  {
+                        return Value.getUndef();
+                    }
+                }
                 return Value.getNAC();
             } else {
                 return Value.getUndef();
