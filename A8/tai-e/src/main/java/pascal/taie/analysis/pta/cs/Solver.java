@@ -26,7 +26,6 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import pascal.taie.World;
 import pascal.taie.analysis.graph.callgraph.CallGraphs;
-import pascal.taie.analysis.graph.callgraph.CallKind;
 import pascal.taie.analysis.graph.callgraph.Edge;
 import pascal.taie.analysis.pta.PointerAnalysisResult;
 import pascal.taie.analysis.pta.PointerAnalysisResultImpl;
@@ -50,7 +49,6 @@ import pascal.taie.analysis.pta.pts.PointsToSet;
 import pascal.taie.analysis.pta.pts.PointsToSetFactory;
 import pascal.taie.config.AnalysisOptions;
 import pascal.taie.ir.IR;
-import pascal.taie.ir.exp.InvokeExp;
 import pascal.taie.ir.exp.Var;
 import pascal.taie.ir.stmt.Copy;
 import pascal.taie.ir.stmt.Invoke;
@@ -63,6 +61,7 @@ import pascal.taie.ir.stmt.StoreField;
 import pascal.taie.language.classes.JField;
 import pascal.taie.language.classes.JMethod;
 import pascal.taie.language.type.Type;
+import pascal.taie.util.collection.Pair;
 
 import java.util.*;
 
@@ -88,7 +87,10 @@ public class Solver {
 
     private PointerAnalysisResult result;
 
-    private final Map<String, Set<CSCallSite>> method2CsCallSite = new HashMap<>();
+    private final Map<JMethod, Set<CSCallSite>> sinkMethod2CallSites = new HashMap<>();
+
+    private final Set<CSCallSite> staticTransferCallSite = new HashSet<>();
+    private final Set<Pair<CSCallSite, CSVar>> instanceTransferCallSite = new HashSet<>();
 
     Solver(AnalysisOptions options, HeapModel heapModel,
            ContextSelector contextSelector) {
@@ -113,18 +115,22 @@ public class Solver {
         workList.addEntry(csVar, PointsToSetFactory.make(csObj));
     }
 
-    public Set<CSCallSite> getCsCallSiteOfMethod(JMethod method) {
-        for (String s : method2CsCallSite.keySet()) {
-            if (s.equals(method.getSignature())) {
-                return method2CsCallSite.get(s);
-            }
-        }
-
-        return new HashSet<>();
+    public Set<CSCallSite> getCallSitesForSinkMethod(JMethod sink) {
+        return sinkMethod2CallSites.computeIfAbsent(sink, set -> new HashSet<>());
     }
 
-    private void addCsCallSiteOfMethod(JMethod method, CSCallSite csCallSite) {
-        method2CsCallSite.computeIfAbsent(method.getSignature(), set -> new HashSet<>()).add(csCallSite);
+    private void recordSinkMethodCallSite(JMethod method, CSCallSite csCallSite) {
+        if (taintAnalysis.isSinkMethod(method)) {
+            sinkMethod2CallSites.computeIfAbsent(method, set -> new HashSet<>()).add(csCallSite);
+        }
+    }
+
+    public void addStaticTransferCallSite(CSCallSite csCallSite) {
+        staticTransferCallSite.add(csCallSite);
+    }
+
+    public void addDynamicTransferCallSite(CSCallSite csCallSite, CSVar base) {
+        instanceTransferCallSite.add(new Pair<>(csCallSite, base));
     }
 
     void solve() {
@@ -180,7 +186,7 @@ public class Solver {
         @Override
         public Void visit(New stmt) { // x = new T();
             Obj newObj = heapModel.getObj(stmt);
-            Context newContext = contextSelector.selectHeapContext(csMethod,newObj);
+            Context newContext = contextSelector.selectHeapContext(csMethod, newObj);
             CSObj newCsObj = csManager.getCSObj(newContext, newObj);
 
             Var x = stmt.getLValue();
@@ -190,6 +196,7 @@ public class Solver {
 
             return null;
         }
+
         @Override
         public Void visit(LoadField stmt) { // y = T.f;
             if (stmt.isStatic()) {
@@ -234,52 +241,55 @@ public class Solver {
 
         @Override
         public Void visit(Invoke stmt) { // r = T.m(a1,...,an);
-            if (stmt.isStatic()) {
-                JMethod jMethod = stmt.getMethodRef().resolve();
-                CSCallSite csCallSite = csManager.getCSCallSite(context, stmt);
-                addCsCallSiteOfMethod(jMethod, csCallSite);
-                Context newContext = contextSelector.selectContext(csCallSite, jMethod);
-                CSMethod csMethod = csManager.getCSMethod(newContext, jMethod);
+            if (!stmt.isStatic()) {
+                return null;
+            }
+            // for static method we don't need to dispatch it
 
-                Edge<CSCallSite, CSMethod> newEdge = new Edge<>(CallGraphs.getCallKind(stmt), csCallSite, csMethod);
-                if (callGraph.addEdge(newEdge)) {
-                    addReachable(csMethod);
-                    // transfer taint Object from argument to result
-                    taintAnalysis.taintTransferStatic(csCallSite);
+            // select context
+            CSCallSite csCallSite = csManager.getCSCallSite(context, stmt);
+            JMethod jMethod = stmt.getMethodRef().resolve();
+            Context newContext = contextSelector.selectContext(csCallSite, jMethod);
 
-                    List<Var> args = stmt.getInvokeExp().getArgs();
-                    IR ir = jMethod.getIR();
-                    List<Var> params = ir.getParams();
+            // Neither there is no need to add anything to workList
 
-                    for (int i = 0; i < args.size(); i++) {
-                        CSVar csArg = csManager.getCSVar(context, args.get(i));
-                        CSVar csParam = csManager.getCSVar(newContext, params.get(i));
+            IR ir = jMethod.getIR();
+            CSMethod csMethod = csManager.getCSMethod(newContext, jMethod);
+            Edge<CSCallSite, CSMethod> newEdge = new Edge<>(CallGraphs.getCallKind(stmt), csCallSite, csMethod);
+            if (callGraph.addEdge(newEdge)) {
+                addReachable(csMethod);
 
-                        addPFGEdge(csArg, csParam);
-                    }
+                // add edges from arguments to parameters
+                List<Var> args = stmt.getInvokeExp().getArgs();
+                List<Var> params = ir.getParams();
+                for (int i = 0; i < args.size(); i++) {
+                    CSVar csArg = csManager.getCSVar(context, args.get(i));
+                    CSVar csParam = csManager.getCSVar(newContext, params.get(i));
 
-                    Var r = stmt.getLValue();
-                    if (r == null) {
-                        return null;
-                    }
-
-
-                    CSVar csR = csManager.getCSVar(context, r);
-                    for (Var returnVar : ir.getReturnVars()) {
-                        CSVar csReturnVar = csManager.getCSVar(newContext, returnVar);
-                        addPFGEdge(csReturnVar, csR);
-                    }
-
-                    // analysis whether this static method is source method
-                    Optional<CSObj> result = taintAnalysis.getTaintObjOf(stmt);
-                    result.ifPresent(csObj -> addEntryToWorkList(csR, csObj));
+                    addPFGEdge(csArg, csParam);
                 }
 
+                Var callerVar = stmt.getLValue();
+                if (callerVar != null) {
+                    // add edges for return vars from callee to caller
+                    CSVar csCallerVar = csManager.getCSVar(context, callerVar);
+                    for (Var calleeVar : ir.getReturnVars()) {
+                        CSVar csCalleeVar = csManager.getCSVar(newContext, calleeVar);
+                        addPFGEdge(csCalleeVar, csCallerVar);
+                    }
+
+                    // if invoke stmt is source, add a taintObj to csCallerVar's pointer set
+                    Optional<CSObj> result = taintAnalysis.createTaintObjFromSource(stmt);
+                    result.ifPresent(csObj -> addEntryToWorkList(csCallerVar, csObj));
+                }
+
+
+                taintAnalysis.propTaintOnStatic(csCallSite);
+                recordSinkMethodCallSite(jMethod, csCallSite);
             }
 
             return null;
         }
-
     }
 
     /**
@@ -308,10 +318,27 @@ public class Solver {
             PointsToSet delta = propagate(n, pts);
 
             if (n instanceof CSVar csVar) {
-                for (CSObj csObj: delta) {
+                for (CSObj csObj : delta) {
                     Var var = csVar.getVar();
                     processCall(csVar, csObj);
-                    if (taintAnalysis.isTaintObj(csObj)) { // skip taint object then
+                    if (taintAnalysis.isTaintObj(csObj)) {
+                        instanceTransferCallSite.stream()
+                                .filter(pair -> {
+                                    CSCallSite csCallSite =  pair.first();
+                                    CSVar base = pair.second();
+                                    return  base.getContext() == csObj.getContext() &&
+                                            (base.getVar() == var || csCallSite.getCallSite().getInvokeExp().getArgs().stream().anyMatch(arg -> arg == var));
+                                })
+                                .forEach(pair -> {
+                                    taintAnalysis.propTaintOnDynamic(pair.first(), pair.second());
+                                });
+
+                        staticTransferCallSite.stream()
+                                .filter(csCallSite ->
+                                        csCallSite.getContext() == csObj.getContext() &&
+                                        csCallSite.getCallSite().getInvokeExp().getArgs().stream().anyMatch(arg -> arg == var))
+                                .forEach(csCallSite -> taintAnalysis.propTaintOnStatic(csCallSite));
+                        // skip taint object then
                         continue;
                     }
 
@@ -387,50 +414,51 @@ public class Solver {
         // TODO - finish me
         Var x = recv.getVar();
         for (Invoke invoke : x.getInvokes()) { // r = x.k(a1,...,an);
-            JMethod jMethod = resolveCallee(recvObj, invoke); // dispatch
-            CSCallSite csCallSite = csManager.getCSCallSite(recv.getContext(), invoke);
-            addCsCallSiteOfMethod(jMethod, csCallSite);
-            Context newContext = contextSelector.selectContext(csCallSite, recvObj, jMethod); // select
-            CSMethod csMethod = csManager.getCSMethod(newContext, jMethod);
+            // dispatch method
+            JMethod jMethod = resolveCallee(recvObj, invoke);
 
-            // add to workList
+            // select context
+            Context curContext = recv.getContext();
+            CSCallSite csCallSite = csManager.getCSCallSite(curContext, invoke);
+            Context newContext = contextSelector.selectContext(csCallSite, recvObj, jMethod);
+
+            // add <Method's this, recvObj> to workList
             IR ir = jMethod.getIR();
             Var methodThis = ir.getThis();
-            CSVar mThisPtr = csManager.getCSVar(newContext, methodThis);
-            PointsToSet pointsToSet = PointsToSetFactory.make(recvObj);
-            workList.addEntry(mThisPtr, pointsToSet);
+            CSVar csMethodThis = csManager.getCSVar(newContext, methodThis);
+            workList.addEntry(csMethodThis, PointsToSetFactory.make(recvObj));
 
+            CSMethod csMethod = csManager.getCSMethod(newContext, jMethod);
             Edge<CSCallSite, CSMethod> newEdge = new Edge<>(CallGraphs.getCallKind(invoke), csCallSite, csMethod);
             if (callGraph.addEdge(newEdge)) {
                 addReachable(csMethod);
-                // transfer taint object if exists
-                taintAnalysis.taintTransferDynamic(csCallSite, recv);
 
+                // add edges from arguments to parameters
                 List<Var> args = invoke.getInvokeExp().getArgs();
                 List<Var> params = ir.getParams();
-
                 for (int i = 0; i < args.size(); i++) {
-                    CSVar argPtr = csManager.getCSVar(recv.getContext(), args.get(i));
-                    CSVar paramPtr = csManager.getCSVar(newContext, params.get(i));
+                    CSVar csArg = csManager.getCSVar(curContext, args.get(i));
+                    CSVar csParam = csManager.getCSVar(newContext, params.get(i));
 
-                    addPFGEdge(argPtr, paramPtr);
+                    addPFGEdge(csArg, csParam);
                 }
 
-                Var r = invoke.getLValue();
-                if (r == null) {
-                    continue;
+                Var callerVar = invoke.getResult();
+                if (callerVar != null) {
+                    // add edges for return vars from callee to caller
+                    CSVar csCallerVar = csManager.getCSVar(curContext, callerVar);
+                    for (Var calleeVar : ir.getReturnVars()) {
+                        CSVar csCalleeVar = csManager.getCSVar(newContext, calleeVar);
+                        addPFGEdge(csCalleeVar, csCallerVar);
+                    }
+
+                    // if invoke is source, create a taintObj and add it to csCallerVar
+                    Optional<CSObj> result = taintAnalysis.createTaintObjFromSource(invoke);
+                    result.ifPresent(taintObj -> addEntryToWorkList(csCallerVar, taintObj));
                 }
-                CSVar rPtr = csManager.getCSVar(recv.getContext(), r);
 
-                for (Var returnVar : ir.getReturnVars()) {
-                    CSVar returnVarPtr = csManager.getCSVar(newContext, returnVar);
-                    addPFGEdge(returnVarPtr, rPtr);
-                }
-
-                // add Taint object to result from source
-                Optional<CSObj> result = taintAnalysis.getTaintObjOf(invoke);
-                result.ifPresent(csObj -> addEntryToWorkList(rPtr, csObj));
-
+                taintAnalysis.propTaintOnDynamic(csCallSite, recv);
+                recordSinkMethodCallSite(jMethod, csCallSite);
             }
         }
     }
@@ -438,8 +466,8 @@ public class Solver {
     /**
      * Resolves the callee of a call site with the receiver object.
      *
-     * @param recv the receiver object of the method call. If the callSite
-     *             is static, this parameter is ignored (i.e., can be null).
+     * @param recv     the receiver object of the method call. If the callSite
+     *                 is static, this parameter is ignored (i.e., can be null).
      * @param callSite the call site to be resolved.
      * @return the resolved callee.
      */

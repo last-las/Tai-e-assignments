@@ -70,7 +70,7 @@ public class TaintAnalysiss {
     }
 
     // TODO - finish me
-    public Optional<CSObj> getTaintObjOf(Invoke stmt) {
+    public Optional<CSObj> createTaintObjFromSource(Invoke stmt) {
         JMethod method = stmt.getMethodRef().resolve();
         if(config.getSources().stream().anyMatch(source -> source.method() == method)){
             // assume the source's type is equal to method's return type, fix here if not
@@ -81,30 +81,39 @@ public class TaintAnalysiss {
         }
     }
 
-    public void taintTransferStatic(CSCallSite csCallSite) {
-        JMethod method = csCallSite.getCallSite().getMethodRef().resolve();
-
-        config.getTransfers().stream().filter(transfer ->method.equals(transfer.method()) && isArgToResult(transfer)).forEach(
-                transfer -> transferTaintArgToResult(transfer, csCallSite)
-        );
-    }
-
-    public void taintTransferDynamic(CSCallSite csCallSite, CSVar base) {
-        JMethod method = csCallSite.getCallSite().getMethodRef().resolve();
-
-        config.getTransfers().stream().filter(transfer -> transfer.method() == method).forEach(transfer -> {
-            if (isArgToResult(transfer)) {
-                transferTaintArgToResult(transfer, csCallSite);
-            } else if (isArgToBase(transfer)) {
-                transferTaintArgToBase(transfer, csCallSite, base);
-            } else if (isBaseToResult(transfer)) {
-                transferTaintBaseToResult(transfer, csCallSite, base);
-            }
-        });
+    public boolean isSinkMethod(JMethod method) {
+        return config.getSinks().stream().anyMatch(sink -> sink.method() == method);
     }
 
     public boolean isTaintObj(CSObj csObj) {
         return manager.isTaint(csObj.getObject());
+    }
+
+    public void propTaintOnStatic(CSCallSite csCallSite) {
+        JMethod method = csCallSite.getCallSite().getMethodRef().resolve();
+
+        config.getTransfers().stream().filter(transfer ->method.equals(transfer.method()) && isArgToResult(transfer)).forEach(
+                transfer ->{
+                    solver.addStaticTransferCallSite(csCallSite);
+                    propTaintFromArg2Result(transfer, csCallSite);
+                }
+        );
+    }
+
+    public void propTaintOnDynamic(CSCallSite csCallSite, CSVar base) {
+        JMethod method = csCallSite.getCallSite().getMethodRef().resolve();
+
+        config.getTransfers().stream().filter(transfer -> transfer.method() == method).forEach(transfer -> {
+            solver.addDynamicTransferCallSite(csCallSite, base);
+
+            if (isArgToResult(transfer)) {
+                propTaintFromArg2Result(transfer, csCallSite);
+            } else if (isArgToBase(transfer)) {
+                propTaintFromArg2Base(transfer, csCallSite, base);
+            } else if (isBaseToResult(transfer)) {
+                propTaintFromBase2Result(transfer, csCallSite, base);
+            }
+        });
     }
 
     private CSObj makeTaint(Invoke stmt, Type type) {
@@ -117,7 +126,7 @@ public class TaintAnalysiss {
                 transfer.to() == TaintTransfer.RESULT;
     }
 
-    private void transferTaintArgToResult(TaintTransfer transfer, CSCallSite csCallSite) {
+    private void propTaintFromArg2Result(TaintTransfer transfer, CSCallSite csCallSite) {
         Invoke callSite = csCallSite.getCallSite();
         List<Var> args = callSite.getInvokeExp().getArgs();
 
@@ -151,7 +160,7 @@ public class TaintAnalysiss {
                 transfer.to() == TaintTransfer.BASE;
     }
 
-    private void transferTaintArgToBase(TaintTransfer transfer, CSCallSite csCallSite, CSVar base) {
+    private void propTaintFromArg2Base(TaintTransfer transfer, CSCallSite csCallSite, CSVar base) {
         Invoke callSite = csCallSite.getCallSite();
         List<Var> args = callSite.getInvokeExp().getArgs();
         int index = transfer.from();
@@ -180,7 +189,7 @@ public class TaintAnalysiss {
                 transfer.to() == TaintTransfer.RESULT;
     }
 
-    private void transferTaintBaseToResult(TaintTransfer transfer, CSCallSite csCallSite, CSVar base){
+    private void propTaintFromBase2Result(TaintTransfer transfer, CSCallSite csCallSite, CSVar base){
         Invoke callSite = csCallSite.getCallSite();
         Context context = csCallSite.getContext();
         Var result = callSite.getResult();
@@ -200,9 +209,6 @@ public class TaintAnalysiss {
         });
     }
 
-    private void propagateTaintObj(CSVar csVar, CSObj csObj) {
-    }
-
     public void onFinish() {
         Set<TaintFlow> taintFlows = collectTaintFlows();
         solver.getResult().storeResult(getClass().getName(), taintFlows);
@@ -214,20 +220,19 @@ public class TaintAnalysiss {
         // TODO - finish me
         // You could query pointer analysis results you need via variable result.
         config.getSinks().forEach(sink -> {
-            JMethod method = sink.method();
-            solver.getCsCallSiteOfMethod(method).forEach(csCallSite -> {
+            JMethod sinkMethod = sink.method();
+            solver.getCallSitesForSinkMethod(sinkMethod).forEach(csCallSite -> {
                 Invoke sinkCall = csCallSite.getCallSite();
                 List<Var> args = sinkCall.getInvokeExp().getArgs();
                 int index = sink.index();
-
                 if (index >= args.size()) {
                     return;
                 }
                 Var arg = args.get(index);
                 Context context = csCallSite.getContext();
-                CSVar csVar = csManager.getCSVar(context, arg);
+                CSVar csArg = csManager.getCSVar(context, arg);
 
-                result.getPointsToSet(csVar).forEach(csObj -> {
+                result.getPointsToSet(csArg).forEach(csObj -> {
                     if (isTaintObj(csObj)) {
                         Invoke sourceCall = manager.getSourceCall(csObj.getObject());
                         taintFlows.add(new TaintFlow(sourceCall, sinkCall, index));
