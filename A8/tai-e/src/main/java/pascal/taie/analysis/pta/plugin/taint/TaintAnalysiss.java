@@ -130,6 +130,9 @@ public class TaintAnalysiss {
         Var arg = args.get(index);
         CSVar csArg = csManager.getCSVar(context, arg);
         Var result = callSite.getResult();
+        if (result == null) {
+            return;
+        }
         CSVar csResult = csManager.getCSVar(context, result);
 
         csArg.getPointsToSet().objects().forEach(csObj -> {
@@ -181,6 +184,9 @@ public class TaintAnalysiss {
         Invoke callSite = csCallSite.getCallSite();
         Context context = csCallSite.getContext();
         Var result = callSite.getResult();
+        if (result == null) {
+            return;
+        }
         CSVar csResult = csManager.getCSVar(context, result);
 
         base.getPointsToSet().objects().forEach(csObj -> {
