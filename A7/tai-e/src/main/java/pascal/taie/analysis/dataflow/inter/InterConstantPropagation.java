@@ -32,8 +32,6 @@ import pascal.taie.analysis.graph.icfg.CallToReturnEdge;
 import pascal.taie.analysis.graph.icfg.NormalEdge;
 import pascal.taie.analysis.graph.icfg.ReturnEdge;
 import pascal.taie.analysis.pta.PointerAnalysisResult;
-import pascal.taie.analysis.pta.core.cs.element.InstanceField;
-import pascal.taie.analysis.pta.core.cs.element.StaticField;
 import pascal.taie.analysis.pta.core.heap.Obj;
 import pascal.taie.config.AnalysisConfig;
 import pascal.taie.ir.IR;
@@ -42,6 +40,7 @@ import pascal.taie.ir.stmt.*;
 import pascal.taie.language.classes.JField;
 import pascal.taie.language.classes.JMethod;
 import pascal.taie.util.collection.HybridArrayHashMap;
+import pascal.taie.util.collection.HybridArrayHashSet;
 
 import java.util.*;
 
@@ -141,11 +140,14 @@ public class InterConstantPropagation extends
             Var x = loadArray.getArrayAccess().getBase();
             Value curIndexVal = in.get(index);
 
-            newOut.update(y, var2StoreArrays.get(x).stream()
-                    .filter(storeArray -> isAliasArrayIndex(curIndexVal, solver.getInFact(storeArray).get(storeArray.getArrayAccess().getIndex())))
-                    .map(storeArray -> solver.getInFact(storeArray).get(storeArray.getRValue()))
-                    .reduce(cp::meetValue).orElse(Value.getUndef())
-            );
+            Set<StoreArray> xRelatedStoreArrays = var2StoreArrays.get(x);
+            if (xRelatedStoreArrays != null) {
+                newOut.update(y, xRelatedStoreArrays.stream()
+                        .filter(storeArray -> isAliasArrayIndex(curIndexVal, solver.getInFact(storeArray).get(storeArray.getArrayAccess().getIndex())))
+                        .map(storeArray -> solver.getInFact(storeArray).get(storeArray.getRValue()))
+                        .reduce(cp::meetValue).orElse(Value.getUndef())
+                );
+            }
 
             return out.copyFrom(newOut);
         }
@@ -155,13 +157,14 @@ public class InterConstantPropagation extends
 
     private boolean transferStoreArrayNode(StoreArray storeArray, CPFact in, CPFact out) { // x[i] = y;
         Var y = storeArray.getRValue();
-        Value yInVal = in.get(y);
-        Value yOutVal = out.get(y);
-        if (!yInVal.equals(yOutVal)) {
+        if (!in.equals(out)) {
             Var index = storeArray.getArrayAccess().getIndex();
             if (ConstantPropagation.canHoldInt(y) && ConstantPropagation.canHoldInt(index)) {
                 Var x = storeArray.getArrayAccess().getBase();
-                solver.addToWorkList(var2LoadArrays.get(x));
+                Set<LoadArray> xRelatedLoadArrays = var2LoadArrays.get(x);
+                if (xRelatedLoadArrays != null) {
+                    solver.addToWorkList(xRelatedLoadArrays);
+                }
             }
         }
 
@@ -184,10 +187,16 @@ public class InterConstantPropagation extends
             CPFact newOut = in.copy();
             FieldAccess fieldAccess = loadField.getFieldAccess();
             if (fieldAccess instanceof InstanceFieldAccess instanceFieldAccess) {
-                newOut.update(y, var2InstanceStoreFields.get(instanceFieldAccess.getBase())
-                        .stream().map(storeField -> solver.getInFact(storeField).get(storeField.getRValue()))
-                        .reduce(cp::meetValue).orElse(Value.getUndef())
-                );
+                Var x = instanceFieldAccess.getBase();
+                JField jField = instanceFieldAccess.getFieldRef().resolve();
+                Set<StoreField> xRelatedStoreFields = var2InstanceStoreFields.get(x);
+                if (xRelatedStoreFields != null) {
+                    newOut.update(y, xRelatedStoreFields.stream()
+                            .filter(storeField -> jField.equals(storeField.getFieldRef().resolve()))
+                            .map(storeField -> solver.getInFact(storeField).get(storeField.getRValue()))
+                            .reduce(cp::meetValue).orElse(Value.getUndef())
+                    );
+                }
             } else {
                 StaticFieldAccess staticFieldAccess = (StaticFieldAccess) fieldAccess;
                 JField jField = staticFieldAccess.getFieldRef().resolve();
@@ -211,7 +220,11 @@ public class InterConstantPropagation extends
         Value yOutVal = out.get(y);
         if (ConstantPropagation.canHoldInt(y) && !yInVal.equals(yOutVal)) {
             if (fieldAccess instanceof InstanceFieldAccess instanceFieldAccess) {
-                solver.addToWorkList(var2InstanceLoadFields.get(instanceFieldAccess.getBase()));
+                Var x = instanceFieldAccess.getBase();
+                Set<LoadField> xRelatedLoadFields = var2InstanceLoadFields.get(x);
+                if (xRelatedLoadFields != null) {
+                    solver.addToWorkList(xRelatedLoadFields);
+                }
             } else {
                 StaticFieldAccess staticFieldAccess = (StaticFieldAccess) fieldAccess;
                 JField jField = staticFieldAccess.getFieldRef().resolve();

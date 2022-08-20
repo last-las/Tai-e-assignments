@@ -104,8 +104,4 @@ class InterSolver<Method, Node, Fact> {
     public Fact getInFact(Node node) {
         return result.getInFact(node);
     }
-
-    public Fact getOutFact(Node node) {
-        return result.getOutFact(node);
-    }
 }
