@@ -4,7 +4,7 @@
   </a>
 
 ## Tai-e Assignments for Static Program Analysis
-![image-20220820161725097](D:\own\java\Tai-e-assignments\image-20220820161725097.png)
+![image-20220820161725097](image-20220820161725097.png)
 
 finally…  纪念一下
 
