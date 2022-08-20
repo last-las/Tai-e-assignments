@@ -4,8 +4,8 @@
   </a>
 
 ## Tai-e Assignments for Static Program Analysis
-</div>
+![image-20220820161725097](D:\own\java\Tai-e-assignments\image-20220820161725097.png)
 
-### Getting Started
+finally…  纪念一下
 
-If you want to do the assignments, please start with "*Overview of Tai-e Assignments*" [[中文](https://tai-e.pascal-lab.net/intro/overview.html)][[English](https://tai-e.pascal-lab.net/en/intro/overview.html)].
+assignment7原本的实现剩两个stmt死活过不了，前后折腾了三个周末… 最后借鉴了别人的思路😒
