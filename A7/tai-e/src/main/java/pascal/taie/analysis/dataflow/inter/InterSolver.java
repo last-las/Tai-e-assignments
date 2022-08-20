@@ -22,17 +22,13 @@
 
 package pascal.taie.analysis.dataflow.inter;
 
+import com.google.common.collect.Queues;
 import pascal.taie.analysis.dataflow.fact.DataflowResult;
 import pascal.taie.analysis.graph.icfg.ICFG;
 import pascal.taie.analysis.graph.icfg.ICFGEdge;
-import pascal.taie.ir.stmt.StoreArray;
-import pascal.taie.ir.stmt.StoreField;
-import pascal.taie.util.collection.SetQueue;
 
 import java.util.Queue;
 import java.util.Set;
-import java.util.Vector;
-import java.util.stream.Collectors;
 
 /**
  * Solver for inter-procedural data-flow analysis.
@@ -64,6 +60,8 @@ class InterSolver<Method, Node, Fact> {
 
     private void initialize() {
         // TODO - finish me
+        workList = Queues.newArrayDeque();
+
         for (Node node : icfg) {
             result.setInFact(node, analysis.newInitialFact());
             result.setOutFact(node, analysis.newInitialFact());
@@ -76,14 +74,12 @@ class InterSolver<Method, Node, Fact> {
 
     private void doSolve() {
         // TODO - finish me
-        Vector<Node> workList = new Vector<>();
-
-        for (Node node: icfg) {
+        for (Node node : icfg) {
             workList.add(node);
         }
 
         while (!workList.isEmpty()) {
-            Node curBlock = workList.remove(0);
+            Node curBlock = workList.remove();
             // calculate IN[B] and update the result
             Fact inB = result.getInFact(curBlock);
             for (ICFGEdge<Node> inEdge: icfg.getInEdgesOf(curBlock)) {
@@ -96,20 +92,16 @@ class InterSolver<Method, Node, Fact> {
             // calculate OUT[B]
             Fact outB = result.getOutFact(curBlock);
             if (analysis.transferNode(curBlock, inB, outB)) {
-                if (curBlock instanceof StoreField || curBlock instanceof StoreArray) {
-                    addNodesToWorkList(workList, icfg.getNodes());
-                } else {
-                    addNodesToWorkList(workList,icfg.getSuccsOf(curBlock));
-                }
+                workList.addAll(icfg.getSuccsOf(curBlock));
             }
         }
     }
 
-    private void addNodesToWorkList(Vector<Node> workList, Set<Node> nodes) {
-        for (Node node : nodes) {
-            if (!workList.contains(node)) {
-                workList.add(node);
-            }
-        }
+    public void addToWorkList(Set<? extends Node> stmts) {
+        workList.addAll(stmts);
+    }
+
+    public Fact getInFact(Node node) {
+        return result.getInFact(node);
     }
 }

@@ -39,8 +39,8 @@ import pascal.taie.ir.exp.*;
 import pascal.taie.ir.stmt.*;
 import pascal.taie.language.classes.JField;
 import pascal.taie.language.classes.JMethod;
-import pascal.taie.util.collection.Maps;
-import pascal.taie.util.collection.Pair;
+import pascal.taie.util.collection.HybridArrayHashMap;
+import pascal.taie.util.collection.HybridArrayHashSet;
 
 import java.util.*;
 
@@ -53,8 +53,13 @@ public class InterConstantPropagation extends
     public static final String ID = "inter-constprop";
 
     private final ConstantPropagation cp;
-    private final ExtralFact extralFact = new ExtralFact();
-    private final AliasSearcher aliasSearcher = new AliasSearcher();
+
+    private final Map<JField, Set<StoreField>> field2StaticStoreFields = new HybridArrayHashMap<>();
+    private  final Map<JField, Set<LoadField>> field2StaticLoadFields = new HybridArrayHashMap<>();
+    private final Map<Var, Set<StoreField>> var2InstanceStoreFields = new HybridArrayHashMap<>();
+    private final Map<Var, Set<LoadField>> var2InstanceLoadFields = new HybridArrayHashMap<>();
+    private final Map<Var, Set<StoreArray>> var2StoreArrays = new HybridArrayHashMap<>();
+    private final Map<Var, Set<LoadArray>> var2LoadArrays = new HybridArrayHashMap<>();
 
     public InterConstantPropagation(AnalysisConfig config) {
         super(config);
@@ -67,26 +72,17 @@ public class InterConstantPropagation extends
         PointerAnalysisResult pta = World.get().getResult(ptaId);
         // You can do initialization work here
 
-        // calculate alias information
-        Collection<Var> vars = pta.getVars();
-        for (Var var1 : vars) {
-            for (Var var2 : vars) {
-                if (var1.equals(var2)) {
-                    continue;
-                }
-
+        // instance fields and arrays
+        for (Var var1 : pta.getVars()) {
+            for (Var var2 : pta.getVars()) {
                 Set<Obj> pts1 = pta.getPointsToSet(var1);
                 Set<Obj> pts2 = pta.getPointsToSet(var2);
-                boolean isAlias = false;
-                for (Obj obj : pts1) {
-                    if (pts2.contains(obj)) {
-                        isAlias = true;
-                        break;
-                    }
-                }
 
-                if (isAlias) {
-                    aliasSearcher.merge(var1, var2);
+                if (pts1.stream().anyMatch(pts2::contains)) { // has intersection
+                    var2InstanceStoreFields.computeIfAbsent(var1, k -> new HashSet<>()).addAll(var2.getStoreFields());
+                    var2InstanceLoadFields.computeIfAbsent(var1, k-> new HashSet<>()).addAll(var2.getLoadFields());
+                    var2StoreArrays.computeIfAbsent(var1, k -> new HashSet<>()).addAll(var2.getStoreArrays());
+                    var2LoadArrays.computeIfAbsent(var1, k -> new HashSet<>()).addAll(var2.getLoadArrays());
                 }
             }
         }
@@ -116,33 +112,129 @@ public class InterConstantPropagation extends
     @Override
     protected boolean transferCallNode(Stmt stmt, CPFact in, CPFact out) {
         // TODO - finish me
-        if (out.equals(in)) {
-            return false;
-        } else {
-            out.clear();
-            out.copyFrom(in);
-            return true;
-        }
+        return out.copyFrom(in);
     }
 
     @Override
     protected boolean transferNonCallNode(Stmt stmt, CPFact in, CPFact out) {
         // TODO - finish me
-        CPFact newOut = in.copy();
-        StmtProcessor stmtProcessor = new StmtProcessor(this.extralFact, this.aliasSearcher, this.cp, newOut);
-        stmt.accept(stmtProcessor);
+        if (stmt instanceof LoadArray loadArray) {
+            return transferLoadArrayNode(loadArray, in, out);
+        } else if (stmt instanceof StoreArray storeArray) {
+            return transferStoreArrayNode(storeArray, in, out);
+        } else if (stmt instanceof LoadField loadField) {
+            return transferLoadFieldNode(loadField, in, out);
+        } else if (stmt instanceof StoreField storeField) {
+            return transferStoreFieldNode(storeField, in, out);
+        }
 
-        if (out.equals(newOut)) {
-            if (stmtProcessor.isExtraFactChanged()) {
-                return true;
-            } else {
-                return false;
+        return cp.transferNode(stmt, in, out);
+    }
+
+    private boolean transferLoadArrayNode(LoadArray loadArray, CPFact in, CPFact out) { // y = x[i];
+        Var y = loadArray.getLValue();
+        Var index = loadArray.getArrayAccess().getIndex();
+        if (ConstantPropagation.canHoldInt(y) && ConstantPropagation.canHoldInt(index)) {
+            CPFact newOut = in.copy();
+
+            Var x = loadArray.getArrayAccess().getBase();
+            Value curIndexVal = in.get(index);
+
+            Set<StoreArray> xRelatedStoreArrays = var2StoreArrays.get(x);
+            if (xRelatedStoreArrays != null) {
+                newOut.update(y, xRelatedStoreArrays.stream()
+                        .filter(storeArray -> isAliasArrayIndex(curIndexVal, solver.getInFact(storeArray).get(storeArray.getArrayAccess().getIndex())))
+                        .map(storeArray -> solver.getInFact(storeArray).get(storeArray.getRValue()))
+                        .reduce(cp::meetValue).orElse(Value.getUndef())
+                );
             }
+
+            return out.copyFrom(newOut);
+        }
+
+        return out.copyFrom(in);
+    }
+
+    private boolean transferStoreArrayNode(StoreArray storeArray, CPFact in, CPFact out) { // x[i] = y;
+        Var y = storeArray.getRValue();
+        if (!in.equals(out)) {
+            Var index = storeArray.getArrayAccess().getIndex();
+            if (ConstantPropagation.canHoldInt(y) && ConstantPropagation.canHoldInt(index)) {
+                Var x = storeArray.getArrayAccess().getBase();
+                Set<LoadArray> xRelatedLoadArrays = var2LoadArrays.get(x);
+                if (xRelatedLoadArrays != null) {
+                    solver.addToWorkList(xRelatedLoadArrays);
+                }
+            }
+        }
+
+        return out.copyFrom(in);
+    }
+
+    private boolean isAliasArrayIndex(Value i1, Value i2) {
+        if (i1.isUndef() || i2.isUndef()) {
+            return false;
+        } else if (i1.isConstant() && i2.isConstant()) {
+            return i1.getConstant() == i2.getConstant();
         } else {
-            out.clear();
-            out.copyFrom(newOut);
             return true;
         }
+    }
+
+    private boolean transferLoadFieldNode(LoadField loadField, CPFact in, CPFact out) { // y = x.f | y = F.f
+        Var y = loadField.getLValue();
+        if (ConstantPropagation.canHoldInt(y)) {
+            CPFact newOut = in.copy();
+            FieldAccess fieldAccess = loadField.getFieldAccess();
+            if (fieldAccess instanceof InstanceFieldAccess instanceFieldAccess) {
+                Var x = instanceFieldAccess.getBase();
+                JField jField = instanceFieldAccess.getFieldRef().resolve();
+                Set<StoreField> xRelatedStoreFields = var2InstanceStoreFields.get(x);
+                if (xRelatedStoreFields != null) {
+                    newOut.update(y, xRelatedStoreFields.stream()
+                            .filter(storeField -> jField.equals(storeField.getFieldRef().resolve()))
+                            .map(storeField -> solver.getInFact(storeField).get(storeField.getRValue()))
+                            .reduce(cp::meetValue).orElse(Value.getUndef())
+                    );
+                }
+            } else {
+                StaticFieldAccess staticFieldAccess = (StaticFieldAccess) fieldAccess;
+                JField jField = staticFieldAccess.getFieldRef().resolve();
+                field2StaticLoadFields.computeIfAbsent(jField, k -> new HashSet<>()).add(loadField);
+                newOut.update(y, field2StaticStoreFields.computeIfAbsent(jField, k -> new HashSet<>())
+                        .stream().map(storeField -> solver.getInFact(storeField).get(storeField.getRValue()))
+                        .reduce(cp::meetValue).orElse(Value.getUndef())
+                );
+            }
+
+            return out.copyFrom(newOut);
+        }
+
+        return out.copyFrom(in);
+    }
+
+    private boolean transferStoreFieldNode(StoreField storeField, CPFact in, CPFact out) { // x.f = y;
+        FieldAccess fieldAccess = storeField.getFieldAccess();
+        Var y = storeField.getRValue();
+        Value yInVal = in.get(y);
+        Value yOutVal = out.get(y);
+        if (ConstantPropagation.canHoldInt(y) && !yInVal.equals(yOutVal)) {
+            if (fieldAccess instanceof InstanceFieldAccess instanceFieldAccess) {
+                Var x = instanceFieldAccess.getBase();
+                Set<LoadField> xRelatedLoadFields = var2InstanceLoadFields.get(x);
+                if (xRelatedLoadFields != null) {
+                    solver.addToWorkList(xRelatedLoadFields);
+                }
+            } else {
+                StaticFieldAccess staticFieldAccess = (StaticFieldAccess) fieldAccess;
+                JField jField = staticFieldAccess.getFieldRef().resolve();
+                field2StaticStoreFields.computeIfAbsent(jField, k -> new HashSet<>()).add(storeField);
+
+                solver.addToWorkList(field2StaticLoadFields.computeIfAbsent(jField, k -> new HashSet<>()));
+            }
+        }
+
+        return out.copyFrom(in);
     }
 
     @Override
@@ -156,8 +248,8 @@ public class InterConstantPropagation extends
         // TODO - finish me
         CPFact newOut = out.copy();
         Stmt sourceStmt = edge.getSource();
-        if (sourceStmt instanceof DefinitionStmt<?,?> definitionStmt) {
-            LValue lValue = definitionStmt.getLValue();
+        if (sourceStmt instanceof DefinitionStmt<?,?>) {
+            LValue lValue = ((DefinitionStmt<?, ?>) sourceStmt).getLValue();
             if (lValue instanceof Var lVar) {
                 newOut.update(lVar, Value.getUndef());
             }
@@ -180,7 +272,6 @@ public class InterConstantPropagation extends
             newOut.update(parameters.get(i), callSiteOut.get(arguments.get(i)));
         }
 
-
         return newOut;
     }
 
@@ -190,7 +281,7 @@ public class InterConstantPropagation extends
         CPFact newOut = new CPFact();
 
         Collection<Var> returnVars = edge.getReturnVars();
-        Value returnValue = mergeReturnVars(returnVars, returnOut);
+        Value returnValue = returnVars.stream().map(returnOut::get).reduce(cp::meetValue).orElse(Value.getUndef());
         Stmt callSite = edge.getCallSite();
         Optional<LValue> def = callSite.getDef();
         if (def.isPresent()) {
@@ -200,336 +291,5 @@ public class InterConstantPropagation extends
             }
         }
         return newOut;
-    }
-
-    private Value mergeReturnVars(Collection<Var> returnVars, CPFact returnOut) {
-        Value returnValue = Value.getUndef();
-        for (Var returnVar : returnVars) {
-            returnValue = cp.meetValue(returnValue, returnOut.get(returnVar));
-            if (returnValue.isNAC()) {
-                return returnValue;
-            }
-        }
-
-        return returnValue;
-    }
-}
-
-class ExtralFact {
-
-    public Map<JField, Value> staticFieldsValue = Maps.newMap();
-
-    public Map<Pair<Var, JField>, Value> instanceFieldsValue = Maps.newMap();
-
-    public Map<Pair<Var, Value>, Value> arraysValue = Maps.newMap();
-
-    public void printArraysValue() {
-        for (Pair<Var, Value> varValuePair : arraysValue.keySet()) {
-            Var first = varValuePair.first();
-            System.out.println(first.getMethod().getName() + ":" + first + "[" + varValuePair.second() + "]=" + arraysValue.get(varValuePair));
-        }
-    }
-
-    public Value getStaticFieldValue(JField jField) {
-        Value value = staticFieldsValue.get(jField);
-        return parseValue(value);
-    }
-
-    public void setStaticFieldValue(JField jField, Value value) {
-        if (!value.isUndef()) {
-            staticFieldsValue.put(jField, value);
-        }
-    }
-
-    public Value getInstanceFieldValue(Var base, JField jField) {
-        Value value = instanceFieldsValue.get(new Pair<>(base, jField));
-        return parseValue(value);
-    }
-
-    public void setInstanceFieldValue(Var base, JField jField, Value value) {
-        if (!value.isUndef()) {
-            instanceFieldsValue.put(new Pair<>(base, jField), value);
-        }
-    }
-
-    public Value getArrayValue(Var base, Value indexVal) {
-        if (indexVal.isConstant()) {
-            return meetValue(
-                    _getArrayValue(base, indexVal),
-                    _getArrayValue(base, Value.getNAC())
-            );
-        } else if (indexVal.isNAC()) {
-            Value baseConstantVal = Value.getUndef();
-            for (Pair<Var, Value> varValuePair : arraysValue.keySet()) {
-                if (varValuePair.first() == base) {
-                    baseConstantVal = meetValue(baseConstantVal, arraysValue.get(varValuePair));
-                }
-            }
-            return baseConstantVal;
-        } else { // Undef
-            return Value.getUndef();
-        }
-    }
-
-    public Value _getArrayValue(Var base, Value indexVal) {
-        Value value = arraysValue.get(new Pair<>(base, indexVal));
-        return parseValue(value);
-    }
-
-    public void setArrayValue(Var base, Value indexVal, Value arrayValue) {
-        if (!indexVal.isUndef()) {
-            _setArrayValue(base, indexVal, arrayValue);
-        }
-    }
-
-    private void _setArrayValue(Var base, Value indexVal, Value arrayValue) {
-        if (!arrayValue.isUndef()) {
-            arraysValue.put(new Pair<>(base, indexVal), arrayValue);
-        }
-    }
-
-    private Value parseValue(Value value) {
-        if (value == null) {
-            return Value.getUndef();
-        } else {
-            return value;
-        }
-    }
-
-    private Value meetValue(Value v1, Value v2) {
-        if (v1.isNAC() || v2.isNAC()) {
-            return Value.getNAC();
-        } else if (v1.isUndef()) {
-            return v2;
-        } else if (v2.isUndef()) {
-            return v1;
-        } else if (v1.getConstant() == v2.getConstant()) {
-            return v1;
-        } else {
-            return Value.getNAC();
-        }
-    }
-}
-
-// a very stupid implementation... space for time :(
-class AliasSearcher {
-    private final Map<Var, Set<Var>> aliasMap;
-
-    public AliasSearcher() {
-        aliasMap = new HashMap<>();
-    }
-
-    public Collection<Var>  getAliasOf(Var var) {
-        Set<Var> aliasSet = aliasMap.get(var);
-        if (aliasSet == null) {
-            aliasSet = new HashSet<>();
-            aliasSet.add(var);
-            aliasMap.put(var, aliasSet);
-        }
-        return aliasSet;
-    }
-
-    public void merge(Var var1, Var var2) {
-        if (aliasMap.containsKey(var1)) {
-            Set<Var> var1AliasSet = aliasMap.get(var1);
-            var1AliasSet.add(var2);
-        } else {
-            HashSet<Var> var1AliasSet = new HashSet<>();
-            var1AliasSet.add(var1);
-            var1AliasSet.add(var2);
-
-            aliasMap.put(var1, var1AliasSet);
-        }
-
-        if (aliasMap.containsKey(var2)) {
-            Set<Var> var2AliasSet = aliasMap.get(var2);
-            var2AliasSet.add(var1);
-        } else {
-            HashSet<Var> var2AliasSet = new HashSet<>();
-            var2AliasSet.add(var1);
-            var2AliasSet.add(var2);
-
-            aliasMap.put(var2, var2AliasSet);
-        }
-    }
-}
-
-// todo: might need to change Void into Boolean here?
-class StmtProcessor implements StmtVisitor<Void> {
-    private final ExtralFact extralFact;
-    private final AliasSearcher aliasSearcher;
-    private final ConstantPropagation cp;
-    private final CPFact newOut;
-
-    private boolean isExtraFactChanged = false;
-
-    public StmtProcessor(ExtralFact extralFact, AliasSearcher aliasSearcher, ConstantPropagation cp, CPFact newOut) {
-        this.extralFact = extralFact;
-        this.aliasSearcher = aliasSearcher;
-        this.cp = cp;
-        this.newOut = newOut;
-    }
-
-    public boolean isExtraFactChanged() {
-        return isExtraFactChanged;
-    }
-
-    @Override
-    public Void visit(Copy copy) {
-        Var lVar = copy.getLValue();
-        if (ConstantPropagation.canHoldInt(lVar)) {
-/*            Var rVar = copy.getRValue();
-            Value rValue = newOut.get(rVar);*/
-            Value lVarNewValue = ConstantPropagation.evaluate(copy.getRValue(), this.newOut);
-            newOut.update(lVar, lVarNewValue);
-        }
-        return null;
-    }
-
-    // todo: should we handle FloatLiteral or DoubleLiteral here(I suppose not)
-    @Override
-    public Void visit(AssignLiteral assignLiteral) {
-        Var lVar = assignLiteral.getLValue();
-        if (ConstantPropagation.canHoldInt(lVar)){
-            Literal rLiteral = assignLiteral.getRValue();
-            /*if (rLiteral instanceof  IntLiteral intLiteral) {
-                int intVal = intLiteral.getValue();
-                newOut.update(lVar, Value.makeConstant(intVal));
-            } else { // If rLiteral is an instance of FloatLiteral / DoubleLiteral, we make it NAC to make sure soundness.
-                newOut.update(lVar, Value.getNAC());
-            }*/
-            Value lVarNewValue = ConstantPropagation.evaluate(rLiteral, this.newOut);
-            newOut.update(lVar, lVarNewValue);
-        }
-        return null;
-    }
-
-    @Override
-    public Void visit(Binary binary) {
-        Var lVar = binary.getLValue();
-        if (ConstantPropagation.canHoldInt(lVar)) {
-            BinaryExp rBinaryExp = binary.getRValue();
-            Value lVarNewValue = ConstantPropagation.evaluate(rBinaryExp, this.newOut);
-            newOut.update(lVar, lVarNewValue);
-        }
-        return null;
-    }
-
-    @Override
-    public Void visit(Unary unary) {
-        Var lVar = unary.getLValue();
-        if (ConstantPropagation.canHoldInt(lVar)) {
-            UnaryExp unaryExp = unary.getRValue();
-            Value lVarNewValue = ConstantPropagation.evaluate(unaryExp, this.newOut);
-            newOut.update(lVar, lVarNewValue);
-        }
-        return null;
-    }
-
-    @Override
-    public Void visit(LoadField loadField) {
-        Var lVar = loadField.getLValue();
-        if (!ConstantPropagation.canHoldInt(lVar)) {
-            return null;
-        }
-
-        FieldAccess fieldAccess = loadField.getFieldAccess();
-        JField jField = fieldAccess.getFieldRef().resolve();
-        Value newValue = Value.getUndef();
-        if (fieldAccess instanceof InstanceFieldAccess instanceFieldAccess) { // load instance field
-            Var base = instanceFieldAccess.getBase();
-            for (Var var : aliasSearcher.getAliasOf(base)) { // meet all alias value into `newValue`
-                Value aliasValue = extralFact.getInstanceFieldValue(var, jField);
-                newValue = cp.meetValue(newValue, aliasValue);
-            }
-
-        } else { // load static field
-            newValue = extralFact.getStaticFieldValue(jField);
-        }
-
-        newOut.update(lVar, newValue);
-        return null;
-    }
-
-    @Override
-    public Void visit(StoreField storeField) {
-        Var rVar = storeField.getRValue();
-        Value rVarValue = newOut.get(rVar);
-
-        FieldAccess fieldAccess = storeField.getFieldAccess();
-        JField jField = fieldAccess.getFieldRef().resolve();
-        Value oldValue, newValue;
-        if (fieldAccess instanceof InstanceFieldAccess instanceFieldAccess) { // store instance field
-            Var base = instanceFieldAccess.getBase();
-            oldValue = extralFact.getInstanceFieldValue(base, jField);
-            newValue = cp.meetValue(oldValue, rVarValue);
-            extralFact.setInstanceFieldValue(base, jField, newValue);
-        } else { // store static field
-            oldValue = extralFact.getStaticFieldValue(jField);
-            newValue = cp.meetValue(oldValue, rVarValue);
-            extralFact.setStaticFieldValue(jField, newValue);
-        }
-
-        if (!oldValue.equals(newValue)) {
-            isExtraFactChanged = true;
-        }
-
-        return null;
-    }
-
-    @Override
-    public Void visit(LoadArray loadArray) {
-        Var lVar = loadArray.getLValue();
-        if (!ConstantPropagation.canHoldInt(lVar)) {
-            return null;
-        }
-
-        ArrayAccess arrayAccess = loadArray.getArrayAccess();
-        Var base = arrayAccess.getBase();
-        Var index = arrayAccess.getIndex();
-        Value indexValue = newOut.get(index);
-        Value lVarNewValue = Value.getUndef();
-
-        for (Var var : aliasSearcher.getAliasOf(base)) { // meet all alias value
-            Value aliasValue = extralFact.getArrayValue(var, indexValue);
-            lVarNewValue = cp.meetValue(lVarNewValue, aliasValue);
-        }
-
-        newOut.update(lVar, lVarNewValue);
-
-        return null;
-    }
-
-
-    /*
-    *
-    * i = 5;
-    * a[i] = 20;
-    * x = a[i];      i = 7;
-    *       [merged]
-    *       a[i] = 1;
-    *       y = a[i];
-    * */
-    @Override
-    public Void visit(StoreArray storeArray) {
-        Var rVar = storeArray.getRValue();
-        Value rVarValue = newOut.get(rVar);
-        ArrayAccess arrayAccess = storeArray.getArrayAccess();
-        Var base = arrayAccess.getBase();
-        Var index = arrayAccess.getIndex();
-        Value indexValue = newOut.get(index);
-        if (indexValue.isUndef()) {
-            return null;
-        }
-
-        Value oldValue = extralFact._getArrayValue(base,indexValue);
-        Value newValue = cp.meetValue(rVarValue, oldValue);
-        extralFact.setArrayValue(base, indexValue, newValue);
-
-        if (!oldValue.equals(newValue)) {
-            isExtraFactChanged = true;
-        }
-
-        return null;
     }
 }
